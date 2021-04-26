@@ -1,0 +1,13 @@
+{
+    "name": "native-eth-coder",
+    "version": "1.0.0",
+    "main": "index.js",
+    "license": "Apache-2.0",
+    "scripts": {
+        "install": "node-gyp-build"
+    },
+    "dependencies": {
+        "node-addon-api": "^3.1.0",
+        "node-gyp-build": "^4.2.3"
+    }
+}
