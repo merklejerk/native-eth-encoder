@@ -85,35 +85,106 @@ namespace encoder {
     }
 
     namespace values {
+        enum class DataValueKind {
+            Uint256,
+            Int256,
+            Bytes32,
+            Bytes,
+            List,
+        };
+
         class DataValue {
         public:
             virtual size_t encoded_size() const = 0;
-            virtual void encode_to(EncodeBuffer& buf, size_t prefix_size = 0) const = 0;
+            virtual void encode(EncodeBuffer& buf) const = 0;
         };
 
-        template <class TValue>
-        class NumericValue: public DataValue {
-        private:
-            TValue _v;
+        class Uint256Value: public DataValue {
+        protected:
+            const uint256_t _value;
 
         public:
-            NumericValue(const TValue& v): _v(v) {}
-            size_t encoded_size() const override { return ETH_WORD_SIZE; };
-            void encode_to(EncodeBuffer& buf) const override {
-                write_word(_v, buf);
+            Uint256Value(uint256_t value): _value(value) {}
+            size_t encoded_size() const override { return ETH_WORD_SIZE; }
+            void encode(EncodeBuffer& buf) const override {
+                write_word(buf, _value);
             }
         };
 
-        typedef NumericValue<uint256_t> Uint256Value;
-        typedef NumericValue<int256_t> Int256Value;
-        typedef NumericValue<bytes32_t> Bytes32Value;
+        class Int256Value: public DataValue {
+        protected:
+            const int256_t _value;
 
-        class BytesArrayValue: public DataValue {
+        public:
+            Int256Value(int256_t value): _value(value) {}
+            size_t encoded_size() const override { return ETH_WORD_SIZE; }
+            void encode(EncodeBuffer& buf) const override {
+                write_word(buf, _value);
+            }
+        };
+
+        class Bytes32Value: public DataValue {
+        protected:
+            const bytes32_t _value;
+
+        public:
+            Bytes32Value(bytes32_t value): _value(value) {}
+            size_t encoded_size() const override { return ETH_WORD_SIZE; }
+            void encode(EncodeBuffer& buf) const override {
+                write_word(buf, _value);
+            }
+        };
+
+        class BytesValue: public DataValue {
+        protected:
+            const buf_t _value;
+
+        public:
+            BytesValue(const buf_t& value): _value(value) {}
+            size_t encoded_size() const override { return sizeof(buf_t); }
+            void encode(EncodeBuffer& buf) const override {
+                buf.write(&_value, &_value + sizeof(buf_t));
+            }
+        };
+
+        class ListValue: public DataValue {
+        protected:
+            const vector<DataValue*> _value;
+
+        public:
+            ListValue(const vector<DataValue*>& value): _value(value) {}
+            size_t encoded_size() const override { throw "ListValue cannot be encoded"; }
+            void encode(EncodeBuffer&) const override {
+                throw "ListValue cannot be encoded";
+            }
+        };
+
+        class DataEncoder {
+        public:
+            virtual size_t encoded_size(DataValue& value) const = 0;
+            virtual void encode_to(EncodeBuffer& buf, DataValue& value, size_t prefix_size = 0) const = 0;
+        };
+
+        template <class TValue>
+        class WordEncoder: public DataEncoder {
+        public:
+            WordEncoder(const TValue& v): _v(v) {}
+            size_t encoded_size(WordDataValue v) const override { return ETH_WORD_SIZE; };
+            void encode_to(EncodeBuffer& buf, const DataValue& value, size_t) const override {
+                value.encode(buf);
+            }
+        };
+
+        typedef WordEncoder<uint256_t> Uint256Encoder;
+        typedef WordEncoder<int256_t> Int256Encoder;
+        typedef WordEncoder<bytes32_t> Bytes32Encoder;
+
+        class BytesArrayEncoder: public DataEncoder {
         private:
             buf_t _bytes;
 
         public:
-            BytesArrayValue(const buf_t& v): _bytes(v) {}
+            BytesArrayEncoder(const buf_t& v): _bytes(v) {}
             size_t encoded_size() const override {
                 return ETH_WORD_SIZE + align_size(_bytes.size());
             }
@@ -123,16 +194,16 @@ namespace encoder {
             }
         };
 
-        class RefListValue: DataValue {
+        class RefListEncoder: DataEncoder {
         protected:
-            vector<DataValue*> _elements;
+            vector<DataEncoder*> _elements;
 
             virtual size_t encoded_array_size() const {
                 return _elements.size() * ETH_WORD_SIZE;
             }
 
         public:
-            RefListValue(const vector<DataValue*>& elements):
+            RefListEncoder(const vector<DataEncoder*>& elements):
                 _elements(elements) {}
             size_t length() const { return _elements.size(); }
             size_t encoded_size() const override {
@@ -159,10 +230,10 @@ namespace encoder {
             }
         };
 
-        template <class TElementValue, typename TBase=RefListValue>
-        class HomogeneousRefListValue: public TBase {
+        template <class TElementValue, typename TBase=RefListEncoder>
+        class HomogeneousRefListEncoder: public TBase {
         public:
-            HomogeneousRefListValue(const vector<TElementValue*>& elements)
+            HomogeneousRefListEncoder(const vector<TElementValue*>& elements)
                 : TBase(elements) {}
             size_t encoded_size() const override {
                 auto total_size = TBase::encoded_array_size();
@@ -176,9 +247,9 @@ namespace encoder {
             }
         };
 
-        class InlineListValue : public DataValue {
+        class InlineListEncoder : public DataEncoder {
         protected:
-            vector<DataValue*> _elements;
+            vector<DataEncoder*> _elements;
 
             virtual size_t encoded_array_size() const {
                 size_t total_size = 0;
@@ -190,7 +261,7 @@ namespace encoder {
             }
 
         public:
-            InlineListValue(const vector<DataValue*>& elements)
+            InlineListEncoder(const vector<DataEncoder*>& elements)
                 : _elements(elements) {}
             size_t length() const { return _elements.size(); }
             size_t encoded_size() const override {
@@ -207,9 +278,9 @@ namespace encoder {
 
         template <
             class TElementValue,
-            typename TBase=InlineListValue
+            typename TBase=InlineListEncoder
         >
-        class HomogeneousInlineListValue : public TBase {
+        class HomogeneousInlineListEncoder : public TBase {
         protected:
             size_t encoded_array_size() const override {
                 // Inline element values inside the array.
@@ -223,17 +294,17 @@ namespace encoder {
             }
 
         public:
-            HomogeneousInlineListValue(const vector<TElementValue*>& elements)
+            HomogeneousInlineListEncoder(const vector<TElementValue*>& elements)
                 : TBase(elements) {}
         };
 
         template <
             class TElementValue,
-            typename TBase=HomogeneousRefListValue<TElementValue>
+            typename TBase=HomogeneousRefListEncoder<TElementValue>
         >
-        class DynamicRefArrayValue: public TBase {
+        class DynamicRefArrayEncoder: public TBase {
         public:
-            DynamicRefArrayValue(const vector<TElementValue*>& v): TBase(v) {}
+            DynamicRefArrayEncoder(const vector<TElementValue*>& v): TBase(v) {}
             size_t encoded_size() const override {
                 return TBase::encoded_size() + ETH_WORD_SIZE;
             }
@@ -245,7 +316,7 @@ namespace encoder {
 
         template <
             class TElementValue,
-            typename TBase=HomogeneousInlineListValue<TElementValue>
+            typename TBase=HomogeneousInlineListEncoder<TElementValue>
         >
         class DynamicInlineArrayValue: public TBase {
         public:
@@ -260,18 +331,18 @@ namespace encoder {
         };
 
         template <class TElementValue>
-        using FixedRefArrayValue = HomogeneousRefListValue<TElementValue>;
+        using FixedRefArrayEncoder = HomogeneousRefListEncoder<TElementValue>;
 
         template <class TElementValue>
-        using FixedInlineArrayValue = HomogeneousInlineListValue<TElementValue>;
+        using FixedInlineArrayEncoder = HomogeneousInlineListEncoder<TElementValue>;
 
         // Efficient version of DynamicInlineArrayValue for numeric elements only.
         template <class TNumeric>
-        class DynamicNumericArrayValue: public DataValue {
+        class DynamicNumericArrayEncoder: public DataEncoder {
         private:
             vector<TNumeric> _numbers;
         public:
-            DynamicNumericArrayValue(const vector<TNumeric>& numbers)
+            DynamicNumericArrayEncoder(const vector<TNumeric>& numbers)
                 : _numbers(numbers) {}
             size_t encoded_size() const override {
                 return (_numbers.size() + 1) * ETH_WORD_SIZE;
@@ -284,13 +355,13 @@ namespace encoder {
             }
         };
 
-        // Efficient version of FixedInlineArrayValue for numeric elements only.
+        // Efficient version of FixedInlineArrayEncoder for numeric elements only.
         template <class TNumeric>
-        class FixedNumericArrayValue: public DataValue {
+        class FixedNumericArrayEncoder: public DataEncoder {
         private:
             vector<TNumeric> _numbers;
         public:
-            FixedNumericArrayValue(const vector<TNumeric>& numbers)
+            FixedNumericArrayEncoder(const vector<TNumeric>& numbers)
                 : _numbers(numbers) {}
             size_t encoded_size() const override {
                 return _numbers.size() * ETH_WORD_SIZE;
@@ -302,7 +373,72 @@ namespace encoder {
             }
         };
 
-        typedef RefListValue RefStructValue;
-        typedef InlineListValue InlineStructValue;
+        typedef RefListEncoder RefStructEncoder;
+        typedef InlineListEncoder InlineStructEncoder;
+
+        class AbiEncoderBuilder {
+            DataEncoder* fromFunction(const FunctionDefinition* d) {
+                auto selector = MethodEncoder.toSelector(d);
+                auto areElementsInline = all_of(
+                    d->inputs.cbegin(),
+                    d->inputs.cend(),
+                    [](i) { return _isInline(i); }
+                );
+                if (areElementsInline) {
+                    return new MethodEncoder(
+                        selector,
+                        InlineListEncoder(fromList(d->inputs))
+                    );
+                }
+                return new MethodEncoder(
+                    selector,
+                    MixedListEncoder(fromList(d->inputs))
+                );
+            }
+            DataEncoder* fromList(const vector<TypeDefinition*>& d) {
+                auto areElementsInline = all_of(
+                    d.cbegin(),
+                    d.cend(),
+                    [](i) { return _isInline(i); }
+                );
+                vector<DataEncoder*> elements;
+                if (areElementsInline) {
+                    return new InlineListEncoder(fromDefinitions(d));
+                }
+                return new MixedListEncoder(fromDefinitions(d));
+            }
+            DataEncoder* fromDefinition(const vector<TypeDefinition*>& d) {
+                if (!d->isArray) {
+                    if (d->baseType == "uint") {
+                        return new UintEncoder(d->typeSize);
+                    } else if (d->baseType == "int") {
+                        return new IntEncoder(d->typeSize);
+                    } else if (d->baseType == "bytes") {
+                        return new BytesEncoder(d->typeSize);
+                    }
+                    throw "Unsupported baseType";
+                } else {
+                    if (!d->arraySize) {
+                        if (d->baseType == "uint"
+                            || d->baseType == "int"
+                            || d->baseType == "bytes") {
+                            return new DynamicWordArrayEncoder(d->typeSize);
+                        } else {
+                            return new DynamicArrayEncoder(fromDefinitions());
+                        }
+                    }
+                    if (d->baseType == "uint"
+                        || d->baseType == "int"
+                        || d->baseType == "bytes") {
+                        return new FixedWordArrayEncoder(d->typeSize);
+                    }
+                }
+                auto areElementsInline = all_of(
+                    d.cbegin(),
+                    d.cend(),
+                    [](i) { return _isInline(i); }
+                );
+            }
+        };
     }
 }
